@@ -154,7 +154,7 @@ export function SettingsModal({ open, onClose }: Props) {
         body: JSON.stringify({ settings: values }),
       });
       if (!res.ok) throw new Error("Save failed");
-      message.success("设置已保存，部分配置需重启后端生效");
+      message.success("设置已保存");
       onClose();
     } catch {
       message.error("保存失败，请重试");

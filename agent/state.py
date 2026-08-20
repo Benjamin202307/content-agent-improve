@@ -14,6 +14,7 @@ class AgentState(TypedDict):
       planner        → 填 outline（基于搜索结果规划）
       researcher     → 填 keywords, raw_materials, context（精准补充搜索）
       writer         → 填 draft（含 [IMAGE:...] 占位符）
+      paraphraser    → 改写 draft 并恢复 Markdown/HTML 结构
       image_fetcher  → 填 images, final_article
     """
     topic: str                   # 用户输入的主题
@@ -24,6 +25,11 @@ class AgentState(TypedDict):
     raw_materials: list[str]     # 搜索到的原始素材（每条一个字符串）
     context: str                 # 整理后的素材摘要（喂给 Writer）
     draft: str                   # 初稿，含 [IMAGE: 英文关键词] 占位符
+    paraphrase_applied: NotRequired[bool]  # 是否已通过指定改写接口
+    paraphrase_request_count: NotRequired[int]  # 本次实际调用改写接口次数
+    paraphrase_changed_count: NotRequired[int]  # 接口返回发生变化的文本片段数
+    paraphrase_request_ids: NotRequired[list[str]]  # 服务端返回的请求凭证
+    paraphrase_error: NotRequired[str]  # 改写失败原因（不包含密钥）
     images: dict[str, str]       # { "[IMAGE: xxx]": "![alt](url)\n*credit*" }
     final_article: str           # 替换图片占位符后的最终文章
     log: list[str]               # 运行日志，供前端侧边栏展示
@@ -33,3 +39,9 @@ class AgentState(TypedDict):
     retry_count: int             # 重写次数（最多 2 次）
     image_style: NotRequired[str]  # 图片风格预设（可选）
     topic_id: NotRequired[int]     # 数据库 topic ID，用于关联向量库
+    screenshot_retry_count: NotRequired[int]  # 截图实际成功数量不足时的补偿轮次（最多 4 轮）
+    screenshot_retry_note: NotRequired[str]   # 补偿写作时避开的失败 URL
+    screenshot_success_count: NotRequired[int]  # Playwright 实际成功截图数
+    needs_screenshot_retry: NotRequired[bool]  # 是否需要重新生成截图候选
+    screenshot_source_urls: NotRequired[list[str]]  # 已接受截图的最终页面 URL
+    screenshot_attempted_urls: NotRequired[list[str]]  # 本次生成已尝试过的候选，跨补图轮次去重

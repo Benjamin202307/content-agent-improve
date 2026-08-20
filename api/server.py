@@ -16,7 +16,7 @@ from fastapi import UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from agent.graph import run_stream
 from agent.state import Platform
-from agent.config import get_config, API_BASE_URL
+from agent.config import get_config, API_BASE_URL, sync_paraphrase_api_key
 from agent.llm import reset_llm_cache
 from agent.prompts.templates import DIRECTION_PRESETS, DEFAULT_DIRECTION
 from agent.publish.wechat_api import check_configured as wechat_configured, publish_article
@@ -25,6 +25,8 @@ from agent.publish.cover_prompt import generate_cover_prompt
 from agent import db, memory
 from agent.tools.image_gen import STYLE_PRESETS, PLATFORM_STYLES
 from api.aihot import AIHotError, fetch_hot_topics
+from agent.nodes.paraphraser import PARAPHRASE_ENGINE_VERSION
+from agent.tools.screenshot import SCREENSHOT_ENGINE_VERSION
 
 app = FastAPI(title="Content Agent API")
 
@@ -74,26 +76,38 @@ async def generate(req: GenerateRequest):
 
     def event_stream():
         last_state = {}
-        for event in run_stream(req.topic, req.platform, req.direction, image_style=req.style, topic_id=topic_id):
-            node = event["node"]
-            data = event["data"]
-            last_state.update(data)
+        try:
+            events = run_stream(req.topic, req.platform, req.direction, image_style=req.style, topic_id=topic_id)
+            for event in events:
+                node = event["node"]
+                data = event["data"]
+                last_state.update(data)
 
-            payload = {
-                "node": node,
-                "active": event.get("active", node),
-                "data": {
-                    "log": data.get("log", []),
-                    "keywords": data.get("keywords", []),
-                    "context": data.get("context", ""),
-                    "draft": data.get("draft", ""),
-                    "critic_score": data.get("critic_score", 0),
-                    "critic_feedback": data.get("critic_feedback", ""),
-                    "final_article": data.get("final_article", ""),
-                    "retry_count": data.get("retry_count", 0),
-                },
-            }
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                payload = {
+                    "node": node,
+                    "active": event.get("active", node),
+                    "data": {
+                        "log": data.get("log", []),
+                        "keywords": data.get("keywords", []),
+                        "context": data.get("context", ""),
+                        "draft": data.get("draft", ""),
+                        "critic_score": data.get("critic_score", 0),
+                        "critic_feedback": data.get("critic_feedback", ""),
+                        "final_article": data.get("final_article", ""),
+                        "retry_count": data.get("retry_count", 0),
+                        "paraphrase_applied": data.get("paraphrase_applied", False),
+                        "paraphrase_request_count": data.get("paraphrase_request_count", 0),
+                        "paraphrase_changed_count": data.get("paraphrase_changed_count", 0),
+                        "paraphrase_request_ids": data.get("paraphrase_request_ids", []),
+                        "paraphrase_error": data.get("paraphrase_error", ""),
+                    },
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            # Keep failures inside the SSE stream so the UI receives a useful cause.
+            message = f"生成失败：{type(exc).__name__}: {exc}"
+            yield f"data: {json.dumps({'node': '__error__', 'data': {'log': [message], 'error': message}}, ensure_ascii=False)}\n\n"
+            return
 
         # 保存文章到数据库
         article_md = last_state.get("final_article", "")
@@ -225,7 +239,7 @@ async def wechat_status():
 async def wechat_recommend_theme(article: str = Form(...), platform: str = Form("wechat")):
     """根据文章内容推荐主题组合（仅微信平台触发）"""
     if platform != "wechat":
-        return {"theme": "default", "code_theme": "atom-one-dark", "serif": True}
+        return {"theme": "default", "code_theme": "github", "serif": True}
 
     from agent.llm import get_llm
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -253,19 +267,19 @@ async def wechat_recommend_theme(article: str = Form(...), platform: str = Form(
         data = _json.loads(text)
         return {
             "theme": data.get("theme", "default"),
-            "code_theme": data.get("code_theme", "atom-one-dark"),
+            "code_theme": data.get("code_theme", "github"),
             "serif": data.get("serif", True),
             "reason": data.get("reason", ""),
         }
     except Exception:
-        return {"theme": "default", "code_theme": "atom-one-dark", "serif": True, "reason": ""}
+        return {"theme": "default", "code_theme": "github", "serif": True, "reason": ""}
 
 
 @app.post("/api/publish/wechat/preview")
 async def wechat_preview(
     article: str = Form(...),
     theme: str = Form("default"),
-    code_theme: str = Form("atom-one-dark"),
+    code_theme: str = Form("github"),
     serif: bool = Form(True),
 ):
     """Markdown → 微信 HTML 预览"""
@@ -290,7 +304,7 @@ async def cover_prompt(req: CoverPromptRequest):
 async def wechat_publish(
     article: str = Form(...),
     theme: str = Form("default"),
-    code_theme: str = Form("atom-one-dark"),
+    code_theme: str = Form("github"),
     serif: bool = Form(True),
     title: str = Form(""),
     summary: str = Form(""),
@@ -359,14 +373,20 @@ _SETTING_KEYS = [
 
 @app.get("/api/settings")
 async def get_settings():
-    """获取所有配置（env 优先，合并 DB），附带风格预设列表"""
+    """获取所有配置；改写密钥与运行时优先级保持一致。"""
     db_settings = db.get_settings()
-    # 合并：env 覆盖 DB，前端看到的是最终生效值
+    # 前端看到的是最终生效值；改写密钥由 DB 设置覆盖 .env。
     merged: dict[str, str] = {}
     for key in _SETTING_KEYS:
         env_val = os.getenv(key, "").strip()
         db_val = db_settings.get(key, "")
-        merged[key] = env_val or db_val
+        # The paraphrase key is user-editable and DB-first in get_config().
+        # Return the same effective value here so reopening Settings never
+        # appears to revert to the bootstrap .env credential.
+        if key == "PARAPHRASE_API_KEY":
+            merged[key] = sync_paraphrase_api_key()
+        else:
+            merged[key] = env_val or db_val
     return {
         "settings": merged,
         "image_styles": [
@@ -383,6 +403,10 @@ class SettingsUpdateRequest(BaseModel):
 @app.put("/api/settings")
 async def update_settings(req: SettingsUpdateRequest):
     """批量更新配置"""
+    if "PARAPHRASE_API_KEY" in req.settings:
+        # Frontend edits are written to .env, SQLite and the current process
+        # together. The next generation therefore uses the new key directly.
+        sync_paraphrase_api_key(req.settings["PARAPHRASE_API_KEY"])
     db.save_settings(req.settings)
     # 配置变更后使 LLM 缓存失效，下次生成时重新读取新配置
     reset_llm_cache()
@@ -394,7 +418,11 @@ async def update_settings(req: SettingsUpdateRequest):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "paraphrase_engine": PARAPHRASE_ENGINE_VERSION,
+        "screenshot_engine": SCREENSHOT_ENGINE_VERSION,
+    }
 
 
 # ─── 静态文件（放在最后，避免拦截 API 路由）─────────────

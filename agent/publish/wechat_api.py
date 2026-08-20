@@ -11,6 +11,8 @@ API 文档：https://developers.weixin.qq.com/doc/offiaccount/Getting_Started/Ov
 
 import os
 import tempfile
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
 import requests
 from agent.config import get_config
 
@@ -224,16 +226,28 @@ def _resolve_local_path(image_url: str) -> str | None:
     """
     如果是本地 API 提供的图片 URL（localhost），直接返回磁盘路径，避免 HTTP 回环下载。
     """
-    import re as _re
-    match = _re.search(r"https?://localhost[:\d]*/api/images/(.+)$", image_url)
-    if not match:
+    if not image_url:
         return None
-    filename = match.group(1)
-    # data/images/ 相对于项目根目录
-    local_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "images", filename)
-    if os.path.exists(local_path):
-        return local_path
-    return None
+    parsed = urlsplit(image_url)
+    path = unquote(parsed.path or "")
+    allowed_hosts = {"localhost", "127.0.0.1", "[::1]", "::1"}
+    configured_host = urlsplit(get_config("API_BASE_URL", "")).hostname
+    if configured_host:
+        allowed_hosts.add(configured_host.lower())
+    is_local_url = (
+        path.startswith("/api/images/")
+        and (not parsed.netloc or (parsed.hostname or "").lower() in allowed_hosts)
+    )
+    if not is_local_url:
+        return None
+
+    filename = Path(path).name
+    if not filename or filename in {".", ".."}:
+        return None
+    # data/images/ 相对于项目根目录；只允许文件名，防止 URL 穿越到其他目录。
+    root = Path(__file__).resolve().parents[2]
+    local_path = root / "data" / "images" / filename
+    return str(local_path) if local_path.is_file() else None
 
 
 def upload_body_image_from_url(access_token: str, image_url: str) -> str:
@@ -241,13 +255,15 @@ def upload_body_image_from_url(access_token: str, image_url: str) -> str:
     下载外部图片并上传到微信，返回微信 URL。
     对 localhost 图片直接读磁盘，避免回环超时。
     """
-    # 优先检查是否为本地图片
+    # 优先检查是否为本地图片（localhost、127.0.0.1 或相对 /api/images URL）。
     local_path = _resolve_local_path(image_url)
     if local_path:
         print(f"  [WeChat] 本地图片，直接读取: {os.path.basename(local_path)}")
         return upload_body_image(access_token, local_path)
 
     # 外部图片：下载后再上传
+    if image_url.startswith("/"):
+        raise RuntimeError(f"无法解析本地图片地址: {image_url}")
     resp = requests.get(image_url, timeout=15, proxies={"http": None, "https": None})
     if resp.status_code != 200:
         raise RuntimeError(f"下载图片失败: {image_url}")
@@ -267,6 +283,61 @@ def upload_body_image_from_url(access_token: str, image_url: str) -> str:
         return upload_body_image(access_token, path)
     finally:
         os.unlink(path)
+
+
+def _upload_body_images(access_token: str, content_html: str) -> tuple[str, int]:
+    """Upload every supported body image and return HTML with WeChat URLs.
+
+    Publishing is atomic from the user's perspective: if any image cannot be
+    uploaded, no draft is created. This prevents a successful response from
+    hiding an image-less draft in WeChat.
+    """
+    import re as _re
+
+    img_src_pattern = _re.compile(
+        r'(?P<prefix><img\b[^>]*?\bsrc\s*=\s*)(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)',
+        _re.IGNORECASE,
+    )
+    uploaded_count = 0
+    image_errors: list[str] = []
+
+    def _upload_src(match: _re.Match[str]) -> str:
+        nonlocal uploaded_count
+        image_url = match.group("url")
+        if not (
+            image_url.startswith("http://")
+            or image_url.startswith("https://")
+            or image_url.startswith("/api/images/")
+        ):
+            image_errors.append(f"{image_url}: 不支持的正文图片地址")
+            return match.group(0)
+        try:
+            print(f"  [WeChat] 上传正文图片: {image_url[:100]}...")
+            wechat_url = upload_body_image_from_url(access_token, image_url)
+            if urlsplit(wechat_url).hostname != "mmbiz.qpic.cn":
+                raise RuntimeError(f"微信返回了非素材域名: {urlsplit(wechat_url).hostname or '空'}")
+            uploaded_count += 1
+            return f'{match.group("prefix")}{match.group("quote")}{wechat_url}{match.group("quote")}'
+        except Exception as exc:
+            image_errors.append(f"{image_url}: {exc}")
+            return match.group(0)
+
+    result_html = img_src_pattern.sub(_upload_src, content_html)
+    if image_errors:
+        details = "; ".join(image_errors[:3])
+        more = f"（另有 {len(image_errors) - 3} 张失败）" if len(image_errors) > 3 else ""
+        raise RuntimeError(f"正文图片上传失败，已停止创建缺图草稿：{details}{more}")
+
+    remaining_urls = [match.group("url") for match in img_src_pattern.finditer(result_html)]
+    invalid_urls = [
+        image_url for image_url in remaining_urls
+        if urlsplit(image_url).hostname != "mmbiz.qpic.cn"
+    ]
+    if invalid_urls:
+        raise RuntimeError(
+            f"正文仍有 {len(invalid_urls)} 张图片未转换为微信素材地址，已停止创建草稿"
+        )
+    return result_html, uploaded_count
 
 
 def create_draft(
@@ -365,22 +436,9 @@ def publish_article(
     # 2. 获取 token
     token = get_access_token()
 
-    # 3. 上传正文中的外部图片到微信素材库，替换 URL
-    import re as _re
-    img_pattern = _re.compile(r'<img([^>]*?)src="(https?://[^"]+)"([^>]*?)/?\s*>')
-    matches = img_pattern.findall(html)
-    for before_src, img_url, after_src in matches:
-        try:
-            print(f"  [WeChat] 上传正文图片: {img_url[:60]}...")
-            wechat_url = upload_body_image_from_url(token, img_url)
-            old_tag = f'<img{before_src}src="{img_url}"{after_src}>'
-            # 如果原标签不是自闭合的也匹配
-            new_tag = f'<img src="{wechat_url}" style="display:block;width:100%;margin:1.5em auto;">'
-            html = html.replace(old_tag, new_tag, 1)
-        except Exception as e:
-            print(f"  [WeChat] 图片上传失败，跳过: {e}")
-            # 上传失败就去掉这张图，不影响发布
-            html = html.replace(f'<img{before_src}src="{img_url}"{after_src}>', '', 1)
+    # 3. 上传正文图片到微信并仅替换 src。保留 alt、图注和主题内联样式。
+    html, uploaded_count = _upload_body_images(token, html)
+    print(f"  [WeChat] 正文图片上传完成: {uploaded_count} 张")
 
     # 4. 上传封面（必须有，微信 API 要求）
     if cover_path and os.path.exists(cover_path):
@@ -404,4 +462,5 @@ def publish_article(
         "media_id": media_id,
         "title": title,
         "summary": summary,
+        "body_image_count": uploaded_count,
     }
