@@ -35,6 +35,7 @@ def get_llm() -> BaseChatModel:
     provider = get_config("LLM_PROVIDER", "openai").lower()
     api_key  = get_config("LLM_API_KEY")
     model    = get_config("LLM_MODEL", "gpt-4o-mini")
+    reasoning_effort = get_config("LLM_REASONING_EFFORT")
 
     if not api_key:
         raise ValueError("未设置 LLM_API_KEY，请在设置中填写")
@@ -42,7 +43,7 @@ def get_llm() -> BaseChatModel:
     if provider == "anthropic":
         return _make_anthropic(api_key, model)
     elif provider == "openai":
-        return _make_openai(api_key, model)
+        return _make_openai(api_key, model, reasoning_effort)
     else:
         raise ValueError(
             f"不支持的 LLM_PROVIDER: '{provider}'，"
@@ -50,7 +51,7 @@ def get_llm() -> BaseChatModel:
         )
 
 
-def _make_openai(api_key: str, model: str) -> BaseChatModel:
+def _make_openai(api_key: str, model: str, reasoning_effort: str | None = None) -> BaseChatModel:
     """
     创建兼容 OpenAI 规范的 LLM。
     Kimi、DeepSeek、通义、硅基流动等只需改 base_url 和 model 即可。
@@ -58,15 +59,33 @@ def _make_openai(api_key: str, model: str) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     base_url = get_config("LLM_BASE_URL")  # 不填则使用 OpenAI 默认地址
+    # Relay providers can take several minutes to return a long reasoning
+    # response. The previous 120-second request timeout converted a slow but
+    # healthy response into LangChain's generic APIConnectionError. Keep the
+    # connect timeout short while allowing a bounded long read.
+    try:
+        read_timeout = float(get_config("LLM_READ_TIMEOUT_SECONDS", "600"))
+    except ValueError:
+        read_timeout = 600.0
+    try:
+        connect_timeout = float(get_config("LLM_CONNECT_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        connect_timeout = 30.0
+    try:
+        max_retries = max(0, int(get_config("LLM_MAX_RETRIES", "3")))
+    except ValueError:
+        max_retries = 3
 
     kwargs = dict(
         api_key=api_key,
         model=model,
-        max_retries=3,       # 遇到 429/500 自动重试，最多 3 次
-        request_timeout=120,  # 单次请求超时 120 秒
+        max_retries=max_retries,
+        timeout=(connect_timeout, read_timeout),
     )
     if base_url:
         kwargs["base_url"] = base_url
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
 
     print(f"  [LLM] OpenAI 规范 | model={model} | base_url={base_url or '(default)'}")
     return ChatOpenAI(**kwargs)

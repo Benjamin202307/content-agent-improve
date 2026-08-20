@@ -3,6 +3,7 @@ from agent.state import AgentState
 from agent.prompts.templates import build_prompt
 from agent.llm import get_llm
 from agent.config import get_config
+import re
 
 
 def _get_image_mode() -> str:
@@ -13,6 +14,11 @@ def _get_image_mode() -> str:
     if provider == "mixed":
         return "mixed"
     return "image"
+
+
+def _screenshot_url_count(draft: str) -> int:
+    urls = re.findall(r"\[SCREENSHOT:\s*([^\],]+)", draft)
+    return len({url.strip().rstrip("/").lower() for url in urls})
 
 
 def writer_node(state: AgentState) -> dict:
@@ -32,7 +38,6 @@ def writer_node(state: AgentState) -> dict:
         outline=state.get("outline", ""),
         image_mode=image_mode,
     )
-
     try:
         res = get_llm().invoke([HumanMessage(content=prompt)])
         draft = res.content.strip()
@@ -43,6 +48,20 @@ def writer_node(state: AgentState) -> dict:
             draft = res.content.strip()
         else:
             raise
+
+    if image_mode == "screenshot":
+        for _ in range(2):
+            count = _screenshot_url_count(draft)
+            if count >= 12:
+                break
+            count_prompt = (
+                f"\n\n【截图数量修订】当前草稿有 {count} 个不同截图 URL。"
+                "请完整重写文章，严格保留原有内容要求。为提高网页失败时的成功率，请输出 12 个不同的 "
+                "[SCREENSHOT: URL, 中文描述] 候选（最终只保留成功且去重后的 5 到 9 张）。"
+                "每个 URL 必须不同，图片必须对应具体段落。"
+            )
+            res = get_llm().invoke([HumanMessage(content=prompt + count_prompt)])
+            draft = res.content.strip()
 
     # 统计占位符数量，方便调试
     import re

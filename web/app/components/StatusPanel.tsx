@@ -10,6 +10,7 @@ const PIPELINE = [
   { key: "researcher", label: "补充搜索" },
   { key: "writer", label: "写作" },
   { key: "critic", label: "质量评估" },
+  { key: "paraphraser", label: "全文改写" },
   { key: "image_fetcher", label: "获取插图" },
   { key: "save_memory", label: "保存素材" },
 ];

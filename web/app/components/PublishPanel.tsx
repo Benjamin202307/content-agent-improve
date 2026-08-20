@@ -27,7 +27,7 @@ export function PublishPanel({ article, platform, onBack }: Props) {
   const [themes, setThemes] = useState<ThemeOption[]>([]);
   const [codeThemes, setCodeThemes] = useState<ThemeOption[]>([]);
   const [selectedTheme, setSelectedTheme] = useState("default");
-  const [selectedCodeTheme, setSelectedCodeTheme] = useState("atom-one-dark");
+  const [selectedCodeTheme, setSelectedCodeTheme] = useState("github");
   const [serif, setSerif] = useState(true);
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
