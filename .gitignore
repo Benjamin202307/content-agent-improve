@@ -14,6 +14,7 @@ wheels/
 
 # Output files
 output_*
+*.log
 
 # RAG 向量库（本地数据）
 data/

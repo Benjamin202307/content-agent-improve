@@ -10,29 +10,41 @@
 from agent.state import AgentState
 from agent.tools.search import search
 from agent.memory import search_similar
+import re
+
+
+def _search_query(topic: str) -> str:
+    """Turn a long writing brief into a focused Tavily query."""
+    title = re.search(r'文章用这个标题[“\"]([^”\"]+)[”\"]', topic)
+    if title:
+        return title.group(1)
+    urls = re.findall(r'https?://[^\s"”]+', topic)
+    head = re.split(r'[。\n]', topic, maxsplit=1)[0].strip()
+    return " ".join(([head[:180]] if head else []) + urls[:1])
 
 
 def pre_researcher_node(state: AgentState) -> dict:
     """基于主题做初步搜索 + RAG 检索，为 Planner 提供实时信息。"""
     topic = state["topic"]
-    print(f"\n[Pre-Researcher] 预搜索：{topic}")
+    query = _search_query(topic)
+    print(f"\n[Pre-Researcher] 预搜索：{query}")
 
     logs: list[str] = []
     raw_materials: list[str] = []
 
     # 1. 搜索实时资讯
-    results = search(topic, max_results=4)
+    results = search(query, max_results=4)
     for r in results:
         raw_materials.append(
             f"标题：{r.get('title', '无标题')}\n"
             f"内容：{r.get('content', '')}\n"
             f"来源：{r.get('url', '')}"
         )
-    logs.append(f"📰 预搜索 \"{topic}\" 找到 {len(results)} 条结果")
+    logs.append(f"📰 预搜索 \"{query}\" 找到 {len(results)} 条结果")
     print(f"  搜索到 {len(results)} 条结果")
 
     # 2. 从向量库检索历史素材
-    history_items = search_similar(topic, k=3)
+    history_items = search_similar(query, k=3)
     history_context = ""
     if history_items:
         history_context = "\n\n---\n\n".join(history_items)

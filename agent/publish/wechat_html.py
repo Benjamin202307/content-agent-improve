@@ -43,7 +43,9 @@ AVAILABLE_CODE_THEMES: dict[str, dict] = {
     "xcode":          {"label": "Xcode",          "pygments": "xcode",         "bg": "#ffffff", "color": "#000000"},
 }
 
-DEFAULT_CODE_THEME = "atom-one-dark"
+# Keep the default code block readable in WeChat's light editor and reader.
+# Dark themes remain available as an explicit user choice.
+DEFAULT_CODE_THEME = "github"
 
 
 def _load_theme_css(theme: str) -> str:
@@ -63,8 +65,6 @@ def _highlight_code_blocks(html: str, code_theme: str = DEFAULT_CODE_THEME) -> s
     code_theme: 代码高亮主题 key（如 "atom-one-dark"）。
     """
     theme_config = AVAILABLE_CODE_THEMES.get(code_theme, AVAILABLE_CODE_THEMES[DEFAULT_CODE_THEME])
-    pygments_style = theme_config["pygments"]
-    bg = theme_config["bg"]
 
     pattern = re.compile(
         r'<pre><code(?:\s+class="language-(\w+)")?>(.*?)</code></pre>',
@@ -74,6 +74,12 @@ def _highlight_code_blocks(html: str, code_theme: str = DEFAULT_CODE_THEME) -> s
     def replacer(match):
         lang = match.group(1)
         code = match.group(2)
+        # Lyrics, prompts and other explicit plain-text blocks should match
+        # the light article surface even when a dark syntax theme is selected.
+        block_theme = "github" if (lang or "").lower() in {"text", "txt", "plaintext"} else code_theme
+        block_config = AVAILABLE_CODE_THEMES.get(block_theme, theme_config)
+        pygments_style = block_config["pygments"]
+        bg = block_config["bg"]
         # 还原 HTML 实体
         code = (
             code.replace("&amp;", "&")

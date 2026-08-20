@@ -24,6 +24,11 @@ export interface AgentEvent {
     critic_feedback?: string;
     final_article?: string;
     retry_count?: number;
+    paraphrase_applied?: boolean;
+    paraphrase_request_count?: number;
+    paraphrase_changed_count?: number;
+    paraphrase_request_ids?: string[];
+    paraphrase_error?: string;
     topic_id?: number;
     article_id?: number;
   };
@@ -128,7 +133,11 @@ export default function Home() {
               const event: AgentEvent = JSON.parse(line.slice(6));
 
               const gs = genStateRef.current;
-              if (event.node === "__done__") {
+              if (event.node === "__error__") {
+                const message = (event.data as AgentEvent["data"] & { error?: string }).error || event.data.log?.[0] || "生成失败";
+                gs.logs = [...gs.logs, message];
+                if (!viewingHistoryRef.current) setLogs([...gs.logs]);
+              } else if (event.node === "__done__") {
                 // 始终更新 ref 缓存
                 gs.article = event.data.final_article || "";
                 gs.score = event.data.critic_score || 0;

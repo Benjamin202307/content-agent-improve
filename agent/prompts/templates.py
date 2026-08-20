@@ -1,4 +1,6 @@
 from agent.state import Platform
+from datetime import date
+import re
 
 # ─────────────────────────────────────────────────────────
 # 内容方向预设 + 平台 Prompt 模板
@@ -70,6 +72,9 @@ WRITING_PRINCIPLES = """
   "标题：""开头钩子：""背景：""核心内容：""观点总结""结尾互动"
   这些是给你的写作指导，不是文章内容，绝对不能出现在输出中
 - 直接像一篇发表在平台上的完整文章一样输出，读者看到的就是最终稿
+- 只输出文章正文。禁止输出核验计划、能力说明、风险提示、拒绝理由、待办事项或向用户索取材料
+- 不得声称无法联网、无法截图、无法调用工具；配图统一使用规定的占位符交给后续程序处理
+- 不得输出任何 API Key、AppSecret、账号凭据或用户提供的操作密钥
 - 用 Markdown 格式：# 标题、## 小节、> 引用、**加粗**、列表、表格、代码块等
 """
 
@@ -175,12 +180,19 @@ IMAGE_INSTRUCTION = """- 插图：在每个 ## 段落开始前，单独一行写
   ✗ [IMAGE: performance comparison]（没有画面）
   ✓ [IMAGE: A futuristic digital illustration showing a glowing Chinese dragon made of circuit board patterns and code streams, coiling around a large glowing "5.1" number. Blue and gold light emanating outward. Color palette: deep navy (#0A1628), electric blue (#1A73E8), gold (#FFD600). Style: flat vector with cinematic lighting, 16:9]"""
 
-SCREENSHOT_INSTRUCTION = """- 插图：在每个 ## 段落开始前，单独一行写 [SCREENSHOT: 官方网址, 中文描述]
-  截图目标必须是与本段内容直接相关的**官方网站、产品页面、文档页面**。
-  优先级：① 官方主页 ② 官方文档/发布说明 ③ 产品演示页面
+SCREENSHOT_INSTRUCTION = """- 插图：在与图片对应的论点或功能说明前，单独一行写 [SCREENSHOT: 官方网址, 中文描述]
+  截图目标必须是与本段内容直接相关的官网功能子页、官方文档页、产品演示页或结果页面。
+  优先截取能体现具体功能、操作步骤、设置界面、数据结果或实际效果的区域，不要使用泛泛的品牌宣传图。
+  禁止使用官网首页、产品入口、登录/注册/认证页面，以及新闻、论坛、博客、公众号或其他博主文章。
+  图片应放在解释该功能或效果的段落附近；中文描述要说明图片具体展示的内容。
+  请安排**12 张不同的截图候选**，为网页限流、验证或加载失败预留余量；最终文章只会保留成功且去重后的 5 到 9 张。
+  每张截图必须使用不同的页面 URL，禁止在文章中重复使用同一张截图。
+  优先级：① 官方文档/发布说明/功能子页面 ② 官方示例或结果页面 ③ 官方产品演示页面。禁止官网主页和产品落地页。
+  避免使用经常触发验证或限流的聚合站、模型社区、API JSON 页面；优先选择同一官方站点内不同的稳定文档子页。
+  同一页面的查询参数、锚点或动态横幅变化仍算同一张图，禁止用来凑数。
   ✗ [SCREENSHOT: https://google.com, 搜索结果]（不是官方页面）
-  ✓ [SCREENSHOT: https://www.anthropic.com/claude, Claude 产品介绍页]
-  ✓ [SCREENSHOT: https://glm5.online/, GLM-5 性能基准测试页面]"""
+  ✓ [SCREENSHOT: https://platform.openai.com/docs/guides/text, 官方文本功能文档]
+  ✓ [SCREENSHOT: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview, 官方提示工程文档]"""
 
 MIXED_INSTRUCTION = """- 插图方式一（截图）：在需要展示**产品界面、官方页面、实际效果**的段落前，单独一行写 [SCREENSHOT: 官方网址, 中文描述]
   截图目标必须是与本段内容直接相关的官方网站、产品页面、文档页面。
@@ -224,12 +236,19 @@ def build_prompt(platform: Platform, topic: str, context: str, direction: str = 
     image_instruction = _get_image_instruction(image_mode)
     template = template.replace("{image_instructions}", image_instruction)
 
+    # Post-processing, publishing and credential instructions are handled by
+    # application code and must not leak into the article-writing prompt.
+    article_topic = re.split(r"完成以上任务后执行以下任务", topic, maxsplit=1)[0].strip()
+    article_topic = re.sub(r"sk-[A-Za-z0-9_-]{16,}", "[已隐藏密钥]", article_topic)
+    article_topic = re.sub(r"(?i)(appsecret\s*(?:是|=|:)\s*)\S+", r"\1[已隐藏]", article_topic)
+
     result = (
         template
         .replace("{direction}", direction_text)
-        .replace("{topic}", topic)
+        .replace("{topic}", article_topic)
         .replace("{context}", context)
     )
+    result = f"【当前日期】{date.today().isoformat()}。所有时间判断必须以此日期为准。\n\n{result}"
     # 注入文章规划（如果有）
     if outline:
         result = result.replace("【素材】", f"【文章规划（Planner 产出，请参考但不必死板遵循）】\n{outline}\n\n【素材】")
