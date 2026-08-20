@@ -24,6 +24,7 @@ from agent.publish.wechat_html import md_to_wechat_html, AVAILABLE_THEMES, AVAIL
 from agent.publish.cover_prompt import generate_cover_prompt
 from agent import db, memory
 from agent.tools.image_gen import STYLE_PRESETS, PLATFORM_STYLES
+from api.aihot import AIHotError, fetch_hot_topics
 
 app = FastAPI(title="Content Agent API")
 
@@ -128,6 +129,19 @@ async def generate(req: GenerateRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+# ─── AIHot 热点榜 ───────────────────────────────────────
+
+@app.get("/api/hot-topics")
+async def hot_topics():
+    """通过后端代理获取 AIHot 匿名热点榜，不向前端暴露第三方调用细节。"""
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        return await run_in_threadpool(fetch_hot_topics)
+    except AIHotError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ─── 主题 CRUD ──────────────────────────────────────────
