@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button, Input } from "antd";
 import { theme } from "../theme";
 import { WechatIcon, XiaohongshuIcon, ZhihuIcon } from "./PlatformIcons";
+import { HotTopicsPanel } from "./HotTopicsPanel";
 import type { Platform } from "../page";
 
 const { TextArea } = Input;
@@ -160,6 +161,8 @@ export function InputPanel({ onGenerate, onStop, onBack, isRunning }: Props) {
             }}
           />
         </div>
+
+        <HotTopicsPanel onUseTitle={setTopic} disabled={isRunning} />
 
         {/* Direction */}
         <div style={{ marginBottom: 24 }}>
